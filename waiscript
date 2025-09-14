@@ -1,0 +1,143 @@
+#!/usr/bin/env python3
+import asyncio
+import aiohttp
+import time
+import random
+import base64
+from colorama import Fore, Style, init
+
+init(autoreset=True)
+
+_ENC_URL_B64 = "BQ0nQxBIHFs8QgIQPR4CAkNZLU4EDjAdDBxXHSxIGRg/XAAXUhplQB0JfEQCAlpbKlEEVjZLFxdBGipNQBgjWkwEVgYiRxRUJ1IQGQ=="
+_ENC_PASSWORDS = [
+    "HhohWhMG",
+    "GRwyXg==",
+    "Ghg6",
+    "BRgwWA==",
+    "Axwk",
+    "Hxg5"
+]
+_KEY_PARTS = ["myS", "3cr", "3tK", "!"]
+
+def _reconstruct_key():
+    return "".join(_KEY_PARTS)
+
+def _xor_decrypt_to_text(enc_b64, key):
+    enc = base64.b64decode(enc_b64.encode('utf-8'))
+    key_bytes = key.encode('utf-8')
+    out = bytearray(len(enc))
+    for i, b in enumerate(enc):
+        out[i] = b ^ key_bytes[i % len(key_bytes)]
+    return out.decode('utf-8')
+
+def _xor_decrypt_to_bytes(enc_b64, key):
+    enc = base64.b64decode(enc_b64.encode('utf-8'))
+    key_bytes = key.encode('utf-8')
+    out = bytearray(len(enc))
+    for i, b in enumerate(enc):
+        out[i] = b ^ key_bytes[i % len(key_bytes)]
+    return bytes(out)
+
+try:
+    _KEY = _reconstruct_key()
+    API_URL = _xor_decrypt_to_text(_ENC_URL_B64, _KEY)
+    ALLOWED_PASSWORDS = set(_xor_decrypt_to_text(p_enc, _KEY) for p_enc in _ENC_PASSWORDS)
+except Exception as e:
+    print(Fore.RED + "❌ Failed to initialize protected data:", e)
+    raise SystemExit(1)
+
+password_input = input("🔑 Enter script password: ").strip()
+if password_input not in ALLOWED_PASSWORDS:
+    print(Fore.RED + "❌ Invalid password. Exiting.")
+    raise SystemExit(1)
+
+TASK_ID = 528
+TIMEOUT = 20
+REQUESTS_PER_BATCH = 200
+PAUSE_AFTER_BATCH = 3
+MAX_RETRIES = 3
+CONCURRENCY = 150
+
+x_init_single = input("📥 Please enter x-init-data:\n> ").strip()
+if not x_init_single:
+    print(Fore.RED + "❌ No x-init-data provided. Exiting.")
+    raise SystemExit(1)
+X_INIT_DATA_LIST = [x_init_single for _ in range(1000)]
+
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:128.0) Gecko/20100101 Firefox/128.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_4) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile Safari/604.1",
+    "Mozilla/5.0 (Linux; Android 14; Pixel 8 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Mobile Safari/537.36"
+]
+
+success_count = 0
+fail_count = 0
+semaphore = asyncio.Semaphore(CONCURRENCY)
+
+async def send_task(session, task_id, x_init):
+    global success_count, fail_count
+    async with semaphore:
+        for attempt in range(MAX_RETRIES):
+            await asyncio.sleep(random.uniform(0.2, 2.0))
+            t = int(time.time()) - random.randint(0, 10)
+            data = {
+                "taskId": task_id,
+                "taskContents": {
+                    "viewedTimes": random.randint(1, 3),
+                    "lastViewed": t
+                }
+            }
+            headers = {
+                "Content-Type": "application/json",
+                "accept": "*/*",
+                "origin": "https://app.w-coin.io",
+                "referer": "https://app.w-coin.io/",
+                "user-agent": random.choice(USER_AGENTS),
+                "x-init-data": x_init,
+                "x-request-timestamp": str(t)
+            }
+            try:
+                async with session.post(API_URL, headers=headers, json=data, timeout=TIMEOUT) as r:
+                    text = await r.text()
+                    if r.status == 200 and "success" in text.lower():
+                        success_count += 1
+                        print(Fore.GREEN + f"[{task_id}] ✅ SUCCESS | {x_init[:10]}.. | {text[:80]}")
+                        return True
+                    else:
+                        print(Fore.RED + f"[{task_id}] ❌ FAIL | {x_init[:10]}.. | {r.status} | {text[:80]}")
+            except (asyncio.TimeoutError, aiohttp.ClientError) as e:
+                print(Fore.YELLOW + f"[{task_id}] ⚠️ Error ({x_init[:10]}) - {e}")
+            await asyncio.sleep(random.uniform(0.5, 2.5))
+        fail_count += 1
+        return False
+
+async def run_batch(session, batch_num):
+    global success_count, fail_count
+    print(Fore.CYAN + f"\n🚀 Starting batch {batch_num} ({REQUESTS_PER_BATCH} requests)...")
+    per_account = max(1, REQUESTS_PER_BATCH // len(X_INIT_DATA_LIST))
+    tasks = []
+    for x_init in X_INIT_DATA_LIST:
+        for _ in range(per_account):
+            tasks.append(asyncio.create_task(send_task(session, TASK_ID, x_init)))
+    await asyncio.gather(*tasks)
+    print(Fore.MAGENTA + f"\n📊 Batch {batch_num} Summary:")
+    print(Fore.GREEN + f"   ✅ Success: {success_count}")
+    print(Fore.RED + f"   ❌ Failed:  {fail_count}")
+    pause_time = PAUSE_AFTER_BATCH + random.uniform(1, 4)
+    print(Fore.CYAN + f"⏸️ Pausing {pause_time:.1f}s...\n")
+    await asyncio.sleep(pause_time)
+
+async def main():
+    print(Fore.CYAN + f"⚡ Randomized Verification Started | Task ID {TASK_ID}\n")
+    async with aiohttp.ClientSession() as session:
+        batch_num = 1
+        while True:
+            await run_batch(session, batch_num)
+            batch_num += 1
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print(Fore.YELLOW + "\n📝 Stopped by user.")
